@@ -8,6 +8,7 @@ Run locally:  streamlit run app.py
 import contextlib
 import io
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -25,6 +26,7 @@ st.set_page_config(page_title="Market Terminal", page_icon="🟧", layout="wide"
 
 BG, PANEL, ORANGE, GREEN, RED, GREY = "#000000", "#0d0d0d", "#ff9900", "#00c853", "#ff3d3d", "#9e9e9e"
 FONT = "Consolas, Courier New, monospace"
+SAST = ZoneInfo("Africa/Johannesburg")
 BIAS_COL = {"STRONG BULLISH": GREEN, "BULLISH": "#69f0ae", "NEUTRAL": GREY,
             "BEARISH": "#ff8a80", "STRONG BEARISH": RED, "—": GREY}
 
@@ -103,6 +105,16 @@ def cached_scan(group_name):
     return table, feed, skipped
 
 
+@st.cache_data(ttl=300, show_spinner="Checking overnight markets…")
+def cached_overnight():
+    return core.overnight_moves()
+
+
+@st.cache_data(ttl=900, show_spinner="Scanning JSE setups…")
+def cached_setups():
+    return core.setups()
+
+
 @st.cache_data(ttl=900, show_spinner="Loading history…")
 def cached_prices(ticker, start, demo, demo_key):
     params = {"etf": {"mu": 0.09, "sigma": 0.16, "seed": 1}, "cc": {"mu": 0.10, "sigma": 0.18, "seed": 2},
@@ -142,8 +154,8 @@ def data_error(e):
 
 st.sidebar.markdown(f"<h2 style='margin-bottom:0'>🟧 MARKET TERMINAL</h2>"
                     f"<div style='color:{GREY};font-family:{FONT};font-size:12px'>"
-                    f"{datetime.now():%a %d %b %Y %H:%M}</div>", unsafe_allow_html=True)
-page = st.sidebar.radio("Screen", ["📊 Market Monitor", "🚦 Signal Scanner", "📈 Security Chart",
+                    f"{datetime.now(SAST):%a %d %b %Y %H:%M} SAST</div>", unsafe_allow_html=True)
+page = st.sidebar.radio("Screen", ["🌅 Morning Brief", "📊 Market Monitor", "🚦 Signal Scanner", "📈 Security Chart",
                                    "🔀 Compare", "🧪 Backtests"], label_visibility="collapsed")
 if st.sidebar.button("🔄 Refresh data"):
     st.cache_data.clear()
@@ -152,11 +164,144 @@ st.sidebar.caption("Data: Yahoo Finance, may be delayed ~15 min. JSE prices show
 GROUPS = ["All"] + list(core.UNIVERSE)
 
 
+
 # --------------------------------------------------------------------------
-# Market Monitor
+# Morning Brief
 # --------------------------------------------------------------------------
 
-if page == "📊 Market Monitor":
+if page == "🌅 Morning Brief":
+    now = datetime.now(SAST)
+    open_at = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    if now.weekday() >= 5:
+        status = "Weekend: the JSE is closed. Brief shows the last session."
+    elif now < open_at:
+        mins = int((open_at - now).total_seconds() // 60)
+        status = f"JSE opens in {mins // 60}h {mins % 60:02d}m (opening auction 08:30–09:00)"
+    elif now.hour < 17:
+        status = "JSE is OPEN (continuous trading until 16:50, closing auction 16:50–17:00)"
+    else:
+        status = "JSE closed for the day. This becomes tomorrow's pre-open brief."
+    banner(f"🌅 MORNING BRIEF &nbsp;|&nbsp; {now:%a %d %b %Y %H:%M} SAST &nbsp;|&nbsp; {status}")
+    st.caption("Mechanical readings from overnight markets and indicators, to help you plan. "
+               "Not buy or sell recommendations. Decide your own trades and size them for your risk.")
+
+    try:
+        ov, tone, ups, n, cues = cached_overnight()
+    except Exception as e:
+        data_error(e); st.stop()
+    tone_col = {"RISK-ON": GREEN, "RISK-OFF": RED}.get(tone, ORANGE)
+    tone_txt = {"RISK-ON": "Most overnight markets are up and/or the rand is firmer. Openings tend to be firmer on days like this.",
+                "RISK-OFF": "Most overnight markets are down and/or the rand is weaker. Expect a softer open; be selective.",
+                "MIXED": "Overnight signals disagree. The open may lack direction; let the first 30 minutes settle."}[tone]
+    st.markdown(f"<div style='font-family:{FONT};font-size:22px;color:{tone_col};font-weight:bold'>{tone} "
+                f"<span style='font-size:14px;color:{GREY}'>({ups}/{n} overnight signals positive)</span></div>"
+                f"<div style='font-family:{FONT};color:#e0e0e0;margin-bottom:8px'>{tone_txt}</div>",
+                unsafe_allow_html=True)
+
+    left, right = st.columns([1, 1.25])
+    with left:
+        banner("OVERNIGHT MARKETS")
+        show_table(ov.style.format({"Last": "{:,.2f}", "Change %": "{:+.2f}"}, na_rep="—")
+                   .map(num_colour, subset=["Change %"]).set_properties(**CELL)
+                   .set_properties(subset=["Market"], **{"color": "#fff", "font-weight": "bold"})
+                   .set_properties(subset=["Ticker"], **{"color": ORANGE}).set_table_styles(TABLE_HEAD))
+        st.caption("USD/ZAR down = rand stronger (usually good for banks and retailers, "
+                   "less so for rand-hedge and mining shares).")
+    with right:
+        banner("JSE OPEN CUES — shares with offshore listings")
+        if cues.empty:
+            st.write("No offshore cues available right now.")
+        else:
+            show_table(cues.style.format({"Their move %": "{:+.2f}", "Currency effect %": "{:+.2f}",
+                                          "Open cue %": "{:+.2f}"}, na_rep="—")
+                       .map(num_colour, subset=["Their move %", "Currency effect %", "Open cue %"])
+                       .set_properties(**CELL)
+                       .set_properties(subset=["JSE share"], **{"color": "#fff", "font-weight": "bold"})
+                       .set_properties(subset=["Ticker"], **{"color": ORANGE})
+                       .set_properties(subset=["Open cue %"], **{"font-weight": "bold"})
+                       .set_table_styles(TABLE_HEAD))
+            st.caption("Open cue = the offshore listing's latest move plus the currency move into rand. "
+                       "A rough guide to the opening direction, not a forecast: part of a US move happens "
+                       "while the JSE is still open, and local news can override it.")
+
+    banner("SETUPS TO WATCH — JSE shares & ETFs")
+    try:
+        su = cached_setups()
+    except Exception as e:
+        data_error(e); st.stop()
+    if su.empty:
+        st.write("No instruments meet the setup rules today. Quiet days are normal; no trade is also a position.")
+    else:
+        kinds = ["All"] + sorted(su["Setup"].unique())
+        kind = st.radio("Setup type", kinds, horizontal=True)
+        view = su if kind == "All" else su[su["Setup"] == kind]
+        setup_col = {"Breakout watch": GREEN, "Pullback in uptrend": "#69f0ae",
+                     "Breakdown risk": RED, "Oversold (counter-trend)": ORANGE}
+        show_table(view.style
+                   .format({"Score": "{:+.0f}", "Last": "{:,.2f}", "Watch level": "{:,.2f}",
+                            "Invalidation": "{:,.2f}", "2R reference": "{:,.2f}", "ATR": "{:,.2f}",
+                            "RSI": "{:.0f}", "Bull edge 20d %": "{:+.2f}"}, na_rep="—")
+                   .set_properties(**CELL)
+                   .set_properties(subset=["Name"], **{"color": "#fff", "font-weight": "bold"})
+                   .set_properties(subset=["Ticker"], **{"color": ORANGE})
+                   .set_properties(subset=["Watch level"], **{"color": "#fff", "font-weight": "bold"})
+                   .map(lambda v: f"color:{setup_col.get(v, GREY)};font-weight:bold", subset=["Setup"])
+                   .map(lambda v: f"color:{BIAS_COL.get(v, GREY)}", subset=["Bias"])
+                   .map(num_colour, subset=["Score", "Bull edge 20d %"])
+                   .set_properties(subset=["Why", "Alerts"], **{"color": GREY, "white-space": "normal",
+                                                                "min-width": "220px"})
+                   .set_table_styles(TABLE_HEAD))
+        with st.expander("How to read the setup table"):
+            st.markdown(
+                "- **Watch level**: the price that would confirm the setup (a 20-day high or low, or yesterday's high).\n"
+                "- **Invalidation**: 1.5× the average daily range (ATR) away from the watch level. If price gets "
+                "there, the setup has failed. Many traders put their stop-loss around this point.\n"
+                "- **2R reference**: twice the distance between watch level and invalidation, a common minimum "
+                "reward-to-risk check. It is not a price target.\n"
+                "- **Bull edge 20d %**: whether bullish readings have actually helped on this share over 5 years. "
+                "Be sceptical of setups where it is near zero or negative.")
+
+    banner("POSITION SIZE CALCULATOR")
+    c1, c2, c3, c4 = st.columns(4)
+    acct = c1.number_input("Account size (R)", value=50000.0, step=5000.0)
+    risk_pct = c2.number_input("Risk per trade %", value=1.0, min_value=0.1, max_value=5.0, step=0.25)
+    entry = c3.number_input("Entry price (R)", value=100.0, step=1.0)
+    stop = c4.number_input("Stop-loss price (R)", value=95.0, step=1.0)
+    per_share = abs(entry - stop)
+    if per_share > 0 and entry > 0:
+        risk_r = acct * risk_pct / 100
+        shares = int(risk_r // per_share)
+        cost = shares * entry
+        capped = cost > acct
+        if capped:
+            shares = int(acct // entry); cost = shares * entry
+        st.markdown(
+            f"<div style='font-family:{FONT};font-size:16px'>Buy up to <b style='color:{ORANGE}'>{shares:,} shares</b> "
+            f"(≈ R{cost:,.0f}). If the stop is hit you lose about "
+            f"<b style='color:{RED}'>R{shares * per_share:,.0f}</b> "
+            f"({shares * per_share / acct * 100:.2f}% of the account), before costs.</div>",
+            unsafe_allow_html=True)
+        if capped:
+            st.caption("Capped by account size: the stop is so close that the full risk amount would need more money than you have.")
+        if cost > acct * 0.25:
+            st.caption("⚠️ This position is over 25% of the account. Consider a smaller size or wider diversification.")
+    else:
+        st.caption("Entry and stop must be different prices.")
+
+    with st.expander("📋 Opening playbook (read before trading)", expanded=False):
+        st.markdown(
+            "1. **Check the tone and cues above.** They set expectations, not certainties.\n"
+            "2. **Skip the opening auction rush.** The JSE auction runs 08:30–09:00 and the first 15–30 minutes "
+            "after 09:00 are the most volatile, with wider spreads. Many traders wait for the opening range to form.\n"
+            "3. **Use limit orders, not market orders**, especially on smaller shares where spreads are wide.\n"
+            "4. **Decide entry, stop and size before you place the trade**, using the calculator. Risking 0.5–2% of "
+            "the account per trade is a common range.\n"
+            "5. **Never move a stop further away or average down on a losing trade.**\n"
+            "6. **Check company news** (SENS announcements, results dates, ex-dividend dates). News beats indicators.\n"
+            "7. **Know your costs.** Brokerage, STT (0.25% on JSE share purchases) and spreads add up fast on frequent trades.\n"
+            "8. **Keep a journal** of every trade and why you took it. After 30+ trades you'll know if your approach works.")
+
+elif page == "📊 Market Monitor":
     grp = st.selectbox("Group", GROUPS)
     groups = core.UNIVERSE if grp == "All" else {grp: core.UNIVERSE[grp]}
     tickers = tuple(t for g in groups.values() for t, _ in g)
