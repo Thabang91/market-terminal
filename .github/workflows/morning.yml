@@ -1,0 +1,22 @@
+name: Morning brief
+
+on:
+  schedule:
+    - cron: "15 6 * * 1-5"   # 08:15 SAST (06:15 UTC), Monday to Friday, before the JSE auction
+  workflow_dispatch:          # lets you run it manually from the Actions tab
+
+jobs:
+  brief:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install yfinance pandas numpy requests
+      - name: Build and send morning brief
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python morning.py
