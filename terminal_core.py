@@ -8,6 +8,21 @@ import pandas as pd
 import yfinance as yf
 
 UNIVERSE = {
+    "JSE Shares": [("NPN.JO", "Naspers"), ("PRX.JO", "Prosus"), ("CFR.JO", "Richemont"),
+                   ("BTI.JO", "British American Tobacco"), ("ANH.JO", "AB InBev"),
+                   ("BHG.JO", "BHP Group"), ("AGL.JO", "Anglo American"), ("GLN.JO", "Glencore"),
+                   ("S32.JO", "South32"), ("KIO.JO", "Kumba Iron Ore"), ("EXX.JO", "Exxaro"),
+                   ("SOL.JO", "Sasol"), ("GFI.JO", "Gold Fields"), ("ANG.JO", "AngloGold Ashanti"),
+                   ("HAR.JO", "Harmony Gold"), ("SSW.JO", "Sibanye-Stillwater"), ("IMP.JO", "Impala Platinum"),
+                   ("NPH.JO", "Northam Platinum"), ("FSR.JO", "FirstRand"), ("SBK.JO", "Standard Bank"),
+                   ("CPI.JO", "Capitec"), ("ABG.JO", "Absa"), ("NED.JO", "Nedbank"), ("INL.JO", "Investec"),
+                   ("SLM.JO", "Sanlam"), ("DSY.JO", "Discovery"), ("OMU.JO", "Old Mutual"),
+                   ("OUT.JO", "OUTsurance"), ("MTN.JO", "MTN Group"), ("VOD.JO", "Vodacom"),
+                   ("SHP.JO", "Shoprite"), ("WHL.JO", "Woolworths"), ("CLS.JO", "Clicks"),
+                   ("MRP.JO", "Mr Price"), ("PPH.JO", "Pepkor"), ("TFG.JO", "TFG (Foschini)"),
+                   ("BID.JO", "Bid Corporation"), ("BVT.JO", "Bidvest"), ("APN.JO", "Aspen"),
+                   ("REM.JO", "Remgro"), ("MNP.JO", "Mondi"), ("GRT.JO", "Growthpoint"),
+                   ("NRP.JO", "NEPI Rockcastle")],
     "JSE ETFs": [("STX40.JO", "Satrix 40"), ("STXSWX.JO", "Satrix SWIX Top 40"),
                  ("STXDIV.JO", "Satrix Dividend Plus"), ("STXPRO.JO", "Satrix Property"),
                  ("STX500.JO", "Satrix S&P 500"), ("STXNDQ.JO", "Satrix Nasdaq 100"),
@@ -25,6 +40,22 @@ UNIVERSE = {
     "Currencies": [("USDZAR=X", "USD/ZAR"), ("EURZAR=X", "EUR/ZAR"), ("GBPZAR=X", "GBP/ZAR")],
     "Crypto": [("BTC-USD", "Bitcoin"), ("ETH-USD", "Ethereum")],
 }
+# Markets that trade while the JSE is closed, used for the morning brief
+OVERNIGHT = [("ES=F", "S&P 500 futures"), ("NQ=F", "Nasdaq 100 futures"), ("^GSPC", "S&P 500 (last close)"),
+             ("^N225", "Nikkei 225"), ("^HSI", "Hang Seng"), ("^AXJO", "ASX 200"),
+             ("BZ=F", "Brent crude"), ("GC=F", "Gold"), ("PL=F", "Platinum"),
+             ("USDZAR=X", "USD/ZAR"), ("BTC-USD", "Bitcoin")]
+TONE_KEYS = ["ES=F", "NQ=F", "^HSI", "^AXJO"]  # plus a stronger rand
+
+# JSE share -> listing that trades after the JSE closes: (ticker, description, currency)
+PAIRS = {"NPN.JO": ("0700.HK", "Tencent, Hong Kong", "HKD"), "PRX.JO": ("0700.HK", "Tencent, Hong Kong", "HKD"),
+         "BHG.JO": ("BHP.AX", "BHP, Sydney", "AUD"), "S32.JO": ("S32.AX", "South32, Sydney", "AUD"),
+         "GFI.JO": ("GFI", "Gold Fields, NYSE", "USD"), "ANG.JO": ("AU", "AngloGold, NYSE", "USD"),
+         "HAR.JO": ("HMY", "Harmony, NYSE", "USD"), "SSW.JO": ("SBSW", "Sibanye, NYSE", "USD"),
+         "SOL.JO": ("SSL", "Sasol, NYSE", "USD"), "BTI.JO": ("BTI", "BAT, NYSE", "USD"),
+         "ANH.JO": ("BUD", "AB InBev, NYSE", "USD")}
+FX_TO_ZAR = {"USD": "USDZAR=X", "HKD": "USDZAR=X", "AUD": "AUDZAR=X"}  # HKD is pegged to USD
+
 NAMES = {t: n for g in UNIVERSE.values() for t, n in g}
 LABELS = {f"{n} ({t})": t for t, n in NAMES.items()}
 
@@ -201,3 +232,119 @@ def scan(groups=None, period="5y"):
     if not feed.empty:
         feed = feed.sort_values("days").drop(columns="days")
     return table, feed, skipped, closes
+
+
+# --------------------------------------------------------------------------
+# Morning brief
+# --------------------------------------------------------------------------
+
+def download_ohlc_many(tickers, period="2y"):
+    """Dict of DataFrames (Open/High/Low/Close, columns = tickers). JSE in rand."""
+    tickers = list(tickers)
+    raw = yf.download(tickers, period=period, auto_adjust=True, progress=False, group_by="column")
+    out = {}
+    for f in ("Open", "High", "Low", "Close"):
+        if isinstance(raw.columns, pd.MultiIndex):
+            df = raw[f].copy()
+        else:
+            df = raw[[f]].rename(columns={f: tickers[0]})
+        for t in df.columns:
+            if is_jse(t):
+                df[t] = df[t] / 100
+        out[f] = df
+    return out
+
+
+def atr(h, l, c, n=14):
+    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+    return tr.rolling(n).mean()
+
+
+def daily_change(s):
+    s = s.dropna()
+    if len(s) < 2:
+        return np.nan, np.nan
+    return s.iloc[-1], (s.iloc[-1] / s.iloc[-2] - 1) * 100
+
+
+def overnight_moves():
+    tickers = [t for t, _ in OVERNIGHT] + ["AUDZAR=X"] + sorted({p[0] for p in PAIRS.values()})
+    closes = download_closes(tuple(dict.fromkeys(tickers)), "1mo")
+    rows = []
+    for t, name in OVERNIGHT:
+        last, chg = daily_change(closes[t]) if t in closes else (np.nan, np.nan)
+        rows.append({"Market": name, "Ticker": t, "Last": last, "Change %": chg})
+    table = pd.DataFrame(rows)
+
+    chg = dict(zip(table["Ticker"], table["Change %"]))
+    votes = [chg.get(k) for k in TONE_KEYS if not pd.isna(chg.get(k, np.nan))]
+    ups = sum(v > 0 for v in votes)
+    zar = chg.get("USDZAR=X", np.nan)
+    if not pd.isna(zar):
+        votes.append(-zar)
+        ups += zar < 0  # USD/ZAR falling = rand stronger
+    n = len(votes)
+    tone = ("RISK-ON" if n and ups / n >= 0.7 else "RISK-OFF" if n and ups / n <= 0.3 else "MIXED")
+
+    cues = []
+    for jse, (ctr, desc, cur) in PAIRS.items():
+        if ctr not in closes:
+            continue
+        _, c_chg = daily_change(closes[ctr])
+        fx = FX_TO_ZAR[cur]
+        _, fx_chg = daily_change(closes[fx]) if fx in closes else (np.nan, 0.0)
+        if pd.isna(c_chg):
+            continue
+        fx_chg = 0.0 if pd.isna(fx_chg) else fx_chg
+        implied = ((1 + c_chg / 100) * (1 + fx_chg / 100) - 1) * 100
+        cues.append({"JSE share": NAMES[jse], "Ticker": jse, "Follows": desc,
+                     "Their move %": c_chg, "Currency effect %": fx_chg, "Open cue %": implied})
+    cues = pd.DataFrame(cues)
+    if not cues.empty:
+        cues = cues.sort_values("Open cue %", key=lambda x: -x.abs())
+    return table, tone, ups, n, cues
+
+
+def setups(groups=("JSE Shares", "JSE ETFs")):
+    """Mechanical pre-open setups with reference levels for JSE instruments."""
+    tickers = tuple(t for g in groups for t, _ in UNIVERSE[g])
+    d = download_ohlc_many(tickers, "2y")
+    rows = []
+    for t in tickers:
+        if t not in d["Close"]:
+            continue
+        c = d["Close"][t].dropna()
+        if len(c) < 260:
+            continue
+        h, l = d["High"][t].reindex(c.index), d["Low"][t].reindex(c.index)
+        a = analyse(c)
+        r = a["RSI"]
+        rng = atr(h, l, c).iloc[-1]
+        hi20, lo20 = h.tail(20).max(), l.tail(20).min()
+        sma50, sma200 = c.rolling(50).mean().iloc[-1], c.rolling(200).mean().iloc[-1]
+        last, prev_hi, prev_lo = c.iloc[-1], h.iloc[-1], l.iloc[-1]
+        setup = None
+        if a["Score"] >= 3 and last >= hi20 - 0.5 * rng:
+            setup, level, stop, side = "Breakout watch", hi20, hi20 - 1.5 * rng, 1
+            note = "Strong uptrend near its 20-day high. Watch for a move above the level."
+        elif a["Score"] >= 2 and r < 45 and last > sma200:
+            setup, level, stop, side = "Pullback in uptrend", prev_hi, prev_hi - 1.5 * rng, 1
+            note = f"Dip inside an uptrend (50-day avg {sma50:,.2f}). A move above yesterday's high shows buyers returning."
+        elif a["Score"] <= -3 and last <= lo20 + 0.5 * rng:
+            setup, level, stop, side = "Breakdown risk", lo20, lo20 + 1.5 * rng, -1
+            note = "Strong downtrend near its 20-day low. Caution on buying; a break lower may continue."
+        elif r <= 30 and a["Score"] <= -2:
+            setup, level, stop, side = "Oversold (counter-trend)", prev_hi, prev_lo - 0.5 * rng, 1
+            note = "Very oversold but still in a downtrend. Bounces happen, but this is the riskiest setup."
+        if not setup:
+            continue
+        risk = abs(level - stop)
+        rows.append({"Name": NAMES[t], "Ticker": t, "Setup": setup, "Bias": a["Bias"], "Score": a["Score"],
+                     "Last": last, "Watch level": level, "Invalidation": stop,
+                     "2R reference": level + side * 2 * risk, "ATR": rng, "RSI": r,
+                     "Bull edge 20d %": a["Bull edge 20d %"], "Why": note,
+                     "Alerts": "; ".join(txt for _, txt in a["events"])})
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values("Score", key=lambda x: -x.abs())
+    return df
