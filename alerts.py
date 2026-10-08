@@ -10,6 +10,7 @@ Local test:
 import os
 import sys
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -46,7 +47,7 @@ def main():
         for alert in core.fresh_alerts(c):
             lines.append(f"<b>{core.NAMES[t]}</b> ({t}) {c.iloc[-1]:,.2f}\n   {alert} · bias {a['Bias'].lower()}")
 
-    header = f"🟧 <b>Market Terminal</b> · {datetime.now():%a %d %b %Y}\n"
+    header = f"🟧 <b>Market Terminal</b> · {datetime.now(ZoneInfo('Africa/Johannesburg')):%a %d %b %Y}\n"
     if lines:
         send(header + f"{len(lines)} new signal(s):\n\n" + "\n\n".join(lines) +
              "\n\n<i>Indicator readings, not advice.</i>")
