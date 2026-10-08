@@ -12,7 +12,9 @@ Educational tool only, not financial advice. Data from Yahoo Finance (personal u
 | `terminal_core.py` | Instrument list, data download, indicators, signal scoring |
 | `strategy_backtester.py` | ETF, covered call and oil backtest engine |
 | `alerts.py` | Nightly scan that sends new signals to Telegram |
+| `morning.py` | Pre-open morning brief sent to Telegram |
 | `.github/workflows/alerts.yml` | Runs `alerts.py` at 18:30 SAST on weekdays |
+| `.github/workflows/morning.yml` | Runs `morning.py` at 08:15 SAST on weekdays |
 | `.streamlit/config.toml` | Dark terminal theme |
 
 ## 1. Run it on your computer (optional)
@@ -63,6 +65,19 @@ Every `git push` redeploys automatically, like Netlify.
 From then on it runs every weekday at 18:30 SAST and only messages you when something new
 happens (golden/death crosses, 200-day breaks, MACD crosses, RSI turning overbought/oversold,
 new 52-week highs/lows). Change the time in `.github/workflows/alerts.yml` (the cron is in UTC).
+
+## Morning brief
+
+The **🌅 Morning Brief** screen (and the 08:15 Telegram message) shows:
+* **Tone**: risk-on / mixed / risk-off from US futures, Hong Kong, Sydney and the rand.
+* **Overnight markets**: futures, Asia, oil, gold, platinum, USD/ZAR, Bitcoin.
+* **JSE open cues**: JSE shares with offshore listings (Naspers/Prosus via Tencent, BHP and South32
+  via Sydney, gold miners, Sasol, BAT and AB InBev via New York), adjusted for the currency move.
+* **Setups to watch**: JSE shares and ETFs that meet mechanical rules (breakout, pullback,
+  breakdown, oversold), with watch level, invalidation level and a 2R reference.
+* **Position size calculator** and an **opening playbook**.
+
+These are indicator readings, not recommendations.
 
 ## Customising
 
